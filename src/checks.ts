@@ -61,6 +61,7 @@ export function check(text: string): Issue[] {
   checkIndent(lines, masked, issues);
   checkSpacing(masked, issues);
   checkBraces(lines, masked, issues);
+  checkNaming(masked, issues);
   return issues.sort((a, b) => a.line - b.line || a.start - b.start);
 }
 
@@ -390,5 +391,183 @@ function checkBraces(lines: string[], masked: string[], issues: Issue[]) {
       }
       issues.push(issue);
     }
+  });
+}
+// ===================================================================
+// 5. Проверка имён (правило naming)
+// ===================================================================
+
+/** Вид проверяемого имени. */
+type Kind = 'variable' | 'function' | 'type' | 'constant';
+
+/** Для каждого вида имён: регулярное выражение «правильного имени» и название стиля. */
+const STYLE: Record<Kind, { re: RegExp; title: string }> = {
+  variable: { re: /^[a-z][a-z0-9]*(_[a-z0-9]+)*_?$/, title: 'snake_case' },   // user_name (в конце _ допустим)
+  function: { re: /^[A-Z][A-Za-z0-9]*$/,             title: 'PascalCase' },   // CalculateSum
+  type:     { re: /^[A-Z][A-Za-z0-9]*$/,             title: 'PascalCase' },   // UserData
+  constant: { re: /^k[A-Z][A-Za-z0-9]*$/,            title: 'kPascalCase' },  // kMaxCount
+};
+
+/** Ключевые слова C/C++ (и main): они никогда не считаются нарушением имени. */
+const KEYWORDS = new Set(['return', 'delete', 'new', 'throw', 'goto', 'case', 'else', 'using', 'typedef', 'namespace',
+  'class', 'struct', 'enum', 'union', 'if', 'for', 'while', 'switch', 'do', 'sizeof', 'operator', 'co_return', 'co_await',
+  'co_yield', 'template', 'typename', 'public', 'private', 'protected', 'friend', 'main', 'const', 'volatile', 'override',
+  'final', 'noexcept', 'default', 'break', 'continue', 'try', 'catch']);
+
+/**
+ * Разбивает имя на отдельные слова (маленькими буквами).
+ *
+ * @param {string} name - исходное имя
+ * @returns {string[]} список слов
+ */
+function words(name: string): string[] {
+  return name
+    .replace(/([a-z0-9])([A-Z])/g, '$1_$2')        // userName → user_Name
+    .replace(/([A-Z]+)([A-Z][a-z])/g, '$1_$2')     // HTTPServer → HTTP_Server
+    .split('_')                                    // режем по подчёркиваниям
+    .filter(Boolean)                               // выкидываем пустые куски
+    .map(w => w.toLowerCase());
+}
+
+/**
+ * Переводит имя в PascalCase (каждое слово с большой буквы, без подчёркиваний).
+ *
+ * @param {string} name - исходное имя
+ * @returns {string} имя в PascalCase
+ */
+const pascal = (name: string): string => words(name).map(w => w[0].toUpperCase() + w.slice(1)).join('');
+
+/**
+ * Переводит имя в snake_case (слова маленькими буквами через «_»).
+ * Если имя заканчивалось на «_» (поле класса), подчёркивание сохраняется.
+ *
+ * @param {string} name - исходное имя
+ * @returns {string} имя в snake_case
+ */
+export const toSnake = (name: string): string => words(name).join('_') + (name.endsWith('_') ? '_' : '');
+
+/**
+ * Проверяет одно имя; если оно написано не по правилам — добавляет нарушение.
+ * Ключевые слова и имена, начинающиеся с «_», пропускаются.
+ *
+ * @param {Issue[]} issues - общий список нарушений
+ * @param {number} line - номер строки, где стоит имя (с нуля)
+ * @param {number} col - номер символа, с которого начинается имя
+ * @param {string} name - само имя
+ * @param {Kind} kind - что это за имя: 'variable' | 'function' | 'type' | 'constant'
+ */
+function checkName(issues: Issue[], line: number, col: number, name: string, kind: Kind) {
+  if (KEYWORDS.has(name) || name.startsWith('_') || STYLE[kind].re.test(name)) return;   // имя в порядке
+
+  // Какое имя предложить вместо неправильного
+  const newName = kind === 'variable' ? toSnake(name)
+    : kind === 'constant' ? 'k' + pascal(name)
+    : pascal(name);
+  if (!newName || newName === name) return;   // исправить не получится — не предлагаем
+
+  issues.push({
+    line, start: col, end: col + name.length, rule: 'naming', newName,
+    message: `Имя «${name}» должно быть в стиле ${STYLE[kind].title} (например, ${newName})`,
+  });
+}
+
+/** Объявление типа: class Foo { / struct Foo : / enum class Foo; (только объявления, не использования). */
+const TYPE_RE = /\b(?:class|struct|union|enum(?:\s+(?:class|struct))?)\s+([A-Za-z_]\w*)(?=\s*(?:[{:;]|$))/g;
+/** Псевдоним типа: using Name = ...; */
+const USING_RE = /\busing\s+(\w+)\s*=/;
+/** Простой typedef: typedef int Name; */
+const TYPEDEF_RE = /^\s*typedef\b[^;{}]*?\b(\w+)\s*;/;
+/** Начало объявления функции: «[модификаторы] тип имя(». Группа 1 — тип, группа 2 — имя. */
+const FUNC_RE = /^\s*(?:(?:static|inline|virtual|constexpr|explicit|extern|friend|const|unsigned|signed)\s+)*([A-Za-z_][\w:]*(?:<[^()]*>)?)[\s*&]+(?:\w+::)*(\w+)\s*\(/;
+/** Параметр функции имеет вид «тип имя» (например, «const std::string& s»). */
+const PARAM_RE = /^[\w:<>,\s*&]*[\s*&]\w+(\s*\[[^\]]*\])?$/;
+/** Объявление переменной: «[const] тип [*&] имя» и далее один из знаков = ; [ { , ) : */
+const VAR_RE = /^\s*(?:for\s*\(\s*)?((?:(?:static|constexpr|const|inline|extern|volatile|mutable|register|thread_local|unsigned|signed|long|short)\s+)*)([A-Za-z_][\w:]*(?:<[^;=()]*>)?)((?:\s*[*&]+\s*|\s+)(?:const\s+)?)(\w+)\s*(=|;|\[|\{|,|\)|:(?!:))/;
+
+/**
+ * Делит текст параметров функции по запятым верхнего уровня.
+ * Запятые внутри <...> и (...) не считаются разделителями.
+ *
+ * @param {string} s - текст между скобками функции, например "int a, std::map<int, int> m"
+ * @returns {{text: string, offset: number}[]} список параметров
+ */
+function splitParams(s: string): { text: string; offset: number }[] {
+  const out: { text: string; offset: number }[] = [];
+  let depth = 0;   // глубина вложенности скобок < и (
+  let from = 0;    // где начался текущий параметр
+  for (let i = 0; i <= s.length; i++) {
+    const c = s[i];
+    if (c === '<' || c === '(') depth++;
+    else if (c === '>' || c === ')') depth--;
+    else if (i === s.length || (c === ',' && depth === 0)) {
+      out.push({ text: s.slice(from, i), offset: from });   // параметр закончился
+      from = i + 1;
+    }
+  }
+  return out;
+}
+
+/**
+ * Проверяет имена в строках файла: типы, функции (и их параметры), переменные, константы.
+ * Если случай нельзя определить надёжно — строка пропускается (ложные срабатывания недопустимы).
+ *
+ * @param {string[]} masked - «закрашенные» строки файла
+ * @param {Issue[]} issues - общий список нарушений, куда добавляются найденные
+ */
+function checkNaming(masked: string[], issues: Issue[]) {
+  masked.forEach((line, n) => {
+    // ---- типы: class / struct / enum / using / typedef ----
+    for (const m of line.matchAll(TYPE_RE)) {
+      // Имя стоит в конце совпадения; вычитаем возможные пробелы после него
+      const col = m.index! + m[0].length - m[1].length - (m[0].length - m[0].trimEnd().length);
+      checkName(issues, n, col, m[1], 'type');
+    }
+    const u = USING_RE.exec(line);
+    if (u) checkName(issues, n, line.indexOf(u[1], u.index + 5), u[1], 'type');
+    const t = TYPEDEF_RE.exec(line);
+    if (t) checkName(issues, n, line.lastIndexOf(t[1]), t[1], 'type');
+
+    // ---- функции и их параметры ----
+    const f = FUNC_RE.exec(line);
+    if (f && !KEYWORDS.has(f[1]) && !KEYWORDS.has(f[2])) {
+      const open = f[0].length - 1;               // позиция открывающей скобки '('
+      const close = findClose(line, open);        // позиция закрывающей ')'
+      if (close < 0) return;                      // параметры на нескольких строках — пропускаем
+
+      const params = line.slice(open + 1, close);                   // текст между скобками
+      const pieces = params.trim() === '' ? [] : splitParams(params);   // список параметров
+      const withoutDefault = (s: string) => s.split('=')[0].trim();     // отбрасываем значение по умолчанию (= 5)
+
+      // Это функция, если все параметры имеют вид «тип имя» (иначе это, например, Foo bar(1, 2);)
+      const isFunction = params.trim() === 'void' || pieces.every(p => PARAM_RE.test(withoutDefault(p.text)));
+      if (!isFunction) return;
+
+      checkName(issues, n, line.lastIndexOf(f[2], open), f[2], 'function');
+
+      for (const p of pieces) {
+        const base = p.text.split('=')[0];                           // параметр без значения по умолчанию
+        const pm = /(\w+)(\s*\[[^\]]*\])?\s*$/.exec(base);           // имя — последнее слово параметра
+        if (pm && params.trim() !== 'void') {
+          checkName(issues, n, open + 1 + p.offset + pm.index, pm[1], 'variable');
+        }
+      }
+      return;   // строку с функцией дальше как переменную не разбираем
+    }
+
+    // ---- переменные и константы ----
+    const v = VAR_RE.exec(line);
+    if (!v) return;
+    const [, mods, type, decl, name, term] = v;    // модификаторы, тип, звёздочки/&, имя, завершающий знак
+    if (KEYWORDS.has(type) || KEYWORDS.has(name)) return;
+
+    // Константа — это const/constexpr с инициализацией. Два случая:
+    //   1) «const int kMax = 5;»        — const стоит в начале, звёздочек и & нет;
+    //   2) «const char* const kName = ...» — сам указатель константный (const стоит ПОСЛЕ звёздочки).
+    // А «const char* p» и «const std::string& s» (указатель/ссылка НА константу) константами не считаются.
+    const isConstPointer = /\*\s*const\s+$/.test(decl);
+    const isPlainConst = /\b(const|constexpr)\b/.test(mods) && !/[*&]/.test(decl);
+    const isConstant = (term === '=' || term === '{') && (isConstPointer || isPlainConst);
+    const col = line.lastIndexOf(name, v[0].length - term.length);   // где в строке начинается имя
+    checkName(issues, n, col, name, isConstant ? 'constant' : 'variable');
   });
 }
