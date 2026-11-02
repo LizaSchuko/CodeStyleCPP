@@ -55,7 +55,11 @@ export interface Issue {
  * @returns {Issue[]} список нарушений, отсортированный по номеру строки
  */
 export function check(text: string): Issue[] {
-  return [];
+  const lines = text.split(/\r?\n/);     // делим на строки (поддерживаем и \n, и \r\n)
+  const masked = maskLines(lines);       // «закрашиваем» комментарии и строки
+  const issues: Issue[] = [];
+  checkIndent(lines, masked, issues);
+  return issues.sort((a, b) => a.line - b.line || a.start - b.start);
 }
 
 /**
@@ -172,4 +176,68 @@ function nextCode(masked: string[], n: number): number {
     if (masked[i].trim() !== '') return i;
   }
   return -1;
+}
+
+// ===================================================================
+// 2. Проверка отступов (правило indentation)
+// ===================================================================
+
+/**
+ * Пересчитывает отступ строки «с нуля»: считает его ширину в колонках
+ * (табуляция = 4 колонки), округляет до целого числа уровней и записывает
+ * заново — либо табами, либо пробелами (смотря чем начинался старый отступ).
+ * Повторный вызов на уже исправленном отступе ничего не меняет.
+ *
+ * @param {string} ws - отступ строки (пробелы и табуляции в её начале)
+ * @returns {string} исправленный отступ: только табы или только пробелы (кратно 4)
+ */
+function fixIndent(ws: string): string {
+  let width = 0;   // ширина отступа в колонках
+  for (const c of ws) {
+    // Табуляция сдвигает до ближайшего числа, кратного 4; пробел добавляет одну колонку
+    width = c === '\t' ? (Math.floor(width / 4) + 1) * 4 : width + 1;
+  }
+  const levels = Math.round(width / 4);   // сколько «уровней» получилось
+  return ws.startsWith('\t') ? '\t'.repeat(levels) : ' '.repeat(levels * 4);
+}
+
+/**
+ * Проверяет отступы всех строк с кодом. Нарушением считается:
+ *   - в одном отступе смешаны табуляции и пробелы;
+ *   - отступ из пробелов в начале оператора не кратен 4.
+ * Строки-продолжения (предыдущая строка закончилась на запятую, скобку,
+ * знак операции) на кратность 4 не проверяются — там допустимо выравнивание.
+ *
+ * @param {string[]} lines - настоящие строки файла
+ * @param {string[]} masked - те же строки с «закрашенными» комментариями
+ * @param {Issue[]} issues - общий список нарушений, куда добавляются найденные
+ */
+function checkIndent(lines: string[], masked: string[], issues: Issue[]) {
+  let prev = '';   // предыдущая строка с кодом (без пробелов по краям)
+
+  masked.forEach((m, n) => {
+    if (m.trim() === '') return;   // пустые строки, комментарии и #-строки пропускаем
+
+    const ws = /^[ \t]*/.exec(lines[n])![0];   // отступ — пробелы/табы в начале строки
+    const hasTab = ws.includes('\t');
+    const hasSpace = ws.includes(' ');
+
+    // Строка «продолжает» оператор, если предыдущая закончилась на , ( [ = + - * / и т.п.
+    const isContinuation = /[,(\[=+\-*\/%&|^?]$/.test(prev);
+
+    let message = '';   // текст нарушения; пустой — значит, всё в порядке
+    if (hasTab && hasSpace) {
+      message = 'В отступе смешаны табуляции и пробелы';
+    } else if (!hasTab && hasSpace && ws.length % 4 !== 0 && !isContinuation) {
+      message = 'Отступ из пробелов должен быть кратен 4';
+    }
+
+    if (message) {
+      issues.push({
+        line: n, start: 0, end: ws.length, rule: 'indentation', message,
+        edits: [{ line: n, start: 0, end: ws.length, text: fixIndent(ws) }],   // исправление: заменить весь отступ
+      });
+    }
+    prev = m.trim();
+  });
 }
