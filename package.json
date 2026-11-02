@@ -1,0 +1,82 @@
+{
+  "name": "codestylelinter",
+  "displayName": "StyleC++",
+  "description": "Проверка и исправление стиля кода C/C++",
+  "version": "1.0.0",
+  "publisher": "liza2",
+  "engines": {
+    "vscode": "^1.80.0"
+  },
+  "categories": [
+    "Linters",
+    "Formatters"
+  ],
+  "main": "./out/extension.js",
+  "activationEvents": [
+    "onLanguage:c",
+    "onLanguage:cpp"
+  ],
+  "scripts": {
+    "compile": "tsc -p ./"
+  },
+  "devDependencies": {
+    "@types/node": "^18.19.0",
+    "@types/vscode": "^1.80.0",
+    "typescript": "^5.4.5"
+  },
+  "contributes": {
+    "commands": [
+      {
+        "command": "codestyle.format",
+        "title": "CodeStyle: Привести файл в порядок"
+      },
+      {
+        "command": "codestyle.check",
+        "title": "CodeStyle: Проверить файл без изменений"
+      },
+      {
+        "command": "codestyle.score",
+        "title": "CodeStyle: Показать оценку стиля"
+      },
+      {
+        "command": "codestyle.report",
+        "title": "CodeStyle: Создать Markdown-отчёт"
+      },
+      {
+        "command": "codestyle.rename",
+        "title": "CodeStyle: Переименовать переменную в snake_case"
+      }
+    ],
+    "keybindings": [
+      {
+        "command": "codestyle.format",
+        "key": "ctrl+alt+l",
+        "when": "editorTextFocus && (editorLangId == c || editorLangId == cpp)"
+      },
+      {
+        "command": "codestyle.check",
+        "key": "ctrl+alt+k",
+        "when": "editorTextFocus && (editorLangId == c || editorLangId == cpp)"
+      },
+      {
+        "command": "codestyle.score",
+        "key": "ctrl+alt+s",
+        "when": "editorTextFocus && (editorLangId == c || editorLangId == cpp)"
+      },
+      {
+        "command": "codestyle.report",
+        "key": "ctrl+alt+r",
+        "when": "editorTextFocus && (editorLangId == c || editorLangId == cpp)"
+      },
+      {
+        "command": "editor.action.quickFix",
+        "key": "ctrl+.",
+        "when": "editorHasCodeActionsProvider && editorTextFocus && !editorReadonly"
+      },
+      {
+        "command": "workbench.actions.view.problems",
+        "key": "ctrl+shift+m"
+      }
+    ]
+  }
+}
