@@ -377,7 +377,7 @@ export function activate(ctx: vscode.ExtensionContext) {
     const uri = await vscode.window.showSaveDialog({
       defaultUri: vscode.Uri.file(ed.document.fileName + '.report.md'), filters: { Markdown: ['md'] } });
     if (!uri) return;   // пользователь нажал «Отмена» — ничего не сохраняем
-    await vscode.workspace.fs.writeFile(uri, Buffer.from(md, 'utf8'));
+    await vscode.workspace.fs.writeFile(uri, new TextEncoder().encode(md));
     info('Отчёт сохранён');
   });
 
