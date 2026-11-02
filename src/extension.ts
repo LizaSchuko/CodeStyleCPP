@@ -114,3 +114,63 @@ async function rename(uri: vscode.Uri, pos: vscode.Position, newName: string): P
 
 /** Сообщение, которое показывается, если переименовать не удалось. */
 const NO_SERVER = 'Не удалось переименовать: нужен языковой сервер C/C++ (расширение «C/C++» от Microsoft).';
+
+// ===================================================================
+// Быстрые исправления (Quick Fix, Ctrl+.)
+// ===================================================================
+
+/** Названия пунктов меню Quick Fix для каждого правила. */
+const TITLES: Record<string, string> = {
+  indentation: 'Исправить отступ',
+  spacing: 'Поставить пробелы',
+  braces: 'Добавить фигурные скобки',
+};
+
+/**
+ * Поставщик быстрых исправлений. VS Code сам вызывает provideCodeActions,
+ * когда пользователь нажимает Ctrl+. или на лампочку рядом с предупреждением.
+ */
+class Fixer implements vscode.CodeActionProvider {
+  /**
+   * Для каждого нашего предупреждения строит пункт меню «Исправить…».
+   *
+   * @param {vscode.TextDocument} doc - документ, в котором открыто меню
+   * @param {vscode.Range} _range - выделенный диапазон (не используется)
+   * @param {vscode.CodeActionContext} ctx - контекст: список предупреждений под курсором
+   * @returns {vscode.CodeAction[]} список пунктов меню (может быть пустым)
+   */
+  provideCodeActions(doc: vscode.TextDocument, _range: vscode.Range, ctx: vscode.CodeActionContext): vscode.CodeAction[] {
+    const issues = check(doc.getText());      // свежий список нарушений
+    const actions: vscode.CodeAction[] = [];
+
+    for (const d of ctx.diagnostics) {
+      if (d.source !== SOURCE) continue;      // чужие предупреждения не обрабатываем
+
+      // Находим наше нарушение, которое соответствует этому предупреждению (по позиции и правилу)
+      const issue = issues.find(i =>
+        i.line === d.range.start.line && i.start === d.range.start.character && i.rule === d.code);
+      if (!issue) continue;
+
+      let action: vscode.CodeAction | undefined;
+      if (issue.newName) {
+        // Нарушение имени: пункт меню запускает переименование через языковой сервер
+        action = new vscode.CodeAction(
+          `Переименовать «${doc.getText(d.range)}» в «${issue.newName}»`, vscode.CodeActionKind.QuickFix);
+        action.command = { title: 'Переименовать', command: 'codestyle.renameAt', arguments: [doc.uri, d.range.start, issue.newName] };
+      } else if (issue.edits) {
+        // Нарушение, которое исправляется правкой текста
+        action = new vscode.CodeAction(TITLES[issue.rule], vscode.CodeActionKind.QuickFix);
+        action.edit = new vscode.WorkspaceEdit();
+        for (const e of issue.edits) {
+          action.edit.replace(doc.uri, new vscode.Range(e.line, e.start, e.line, e.end), e.text);
+        }
+      }
+      // Если исправление небезопасно (например, сложный if без скобок), пункта в меню просто не будет
+      if (action) {
+        action.diagnostics = [d];   // связываем пункт с конкретным предупреждением
+        actions.push(action);
+      }
+    }
+    return actions;
+  }
+}
