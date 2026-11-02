@@ -45,63 +45,6 @@ export interface Issue {
 }
 
 // ===================================================================
-// 6. Публичные функции (их использует extension.ts)
-// ===================================================================
-
-/**
- * Главная функция проверки: находит все нарушения стиля в тексте программы.
- *
- * @param {string} text - полный текст файла C/C++
- * @returns {Issue[]} список нарушений, отсортированный по номеру строки
- */
-export function check(text: string): Issue[] {
-  const lines = text.split(/\r?\n/);     // делим на строки (поддерживаем и \n, и \r\n)
-  const masked = maskLines(lines);       // «закрашиваем» комментарии и строки
-  const issues: Issue[] = [];
-  checkIndent(lines, masked, issues);
-  checkSpacing(masked, issues);
-  checkBraces(lines, masked, issues);
-  checkNaming(masked, issues);
-  return issues.sort((a, b) => a.line - b.line || a.start - b.start);
-}
-
-
-/**
- * Применяет правки к тексту. Правки, которые пересекаются с уже применёнными, пропускаются
- * (чтобы две правки не испортили друг друга).
- *
- * @param {string} text - исходный текст файла
- * @param {Edit[]} edits - список правок (обычно собранный из issue.edits)
- * @returns {string} новый текст с применёнными правками (строки соединены через «\n»)
- */
-export function applyEdits(text: string, edits: Edit[]): string {
-  const lines = text.split(/\r?\n/);
-  // Применяем с конца файла к началу, чтобы правки не сдвигали позиции друг друга
-  const sorted = [...edits].sort((a, b) => b.line - a.line || b.start - a.start);
-  let lastLine = -1;    // строка последней применённой правки
-  let lastStart = 0;    // где последняя применённая правка начиналась
-  for (const e of sorted) {
-    if (e.line === lastLine && e.end > lastStart) continue;   // правка пересекается с уже применённой — пропускаем
-    lines[e.line] = lines[e.line].slice(0, e.start) + e.text + lines[e.line].slice(e.end);
-    lastLine = e.line;
-    lastStart = e.start;
-  }
-  return lines.join('\n');
-}
-
-/**
- * Считает оценку стиля в процентах по формуле
- * score = max(0, round(100 − нарушения / строки × 100)).
- *
- * @param {number} violations - количество нарушений
- * @param {number} lineCount - количество строк в файле (0 для пустого файла)
- * @returns {number} оценка от 0 до 100; для пустого файла и файла без нарушений — 100
- */
-export function score(violations: number, lineCount: number): number {
-  return lineCount === 0 ? 100 : Math.max(0, Math.round(100 - violations / lineCount * 100));
-}
-
-// ===================================================================
 // 1. Подготовка текста: «закрашиваем» то, что проверять не нужно
 // ===================================================================
 
@@ -111,8 +54,15 @@ export function score(violations: number, lineCount: number): number {
  * Длина каждой строки при этом не меняется, поэтому номера символов
  * в «закрашенной» и в настоящей строке совпадают.
  *
- * @param {string[]} lines - строки исходного файла (без символов переноса)
- * @returns {string[]} те же строки, но с «закрашенными» комментариями и строками
+ * Параметры:
+ *     lines (string[]): строки исходного файла (без символов переноса)
+ *
+ * Возвращаемое значение:
+ *     результат (string[]): те же строки, но с «закрашенными» комментариями и строками
+ *
+ * Пример вызова:
+ *     maskLines(['int a = 1; // число']);   // → ['int a = 1;          ']
+ *     maskLines(['s = "a=b";']);            // → ['s = "   ";']  (кавычки остаются)
  */
 function maskLines(lines: string[]): string[] {
   let inBlock = false;   // true, если мы сейчас внутри многострочного комментария /* ... */
@@ -165,9 +115,16 @@ function maskLines(lines: string[]): string[] {
  * Находит закрывающую скобку ')' для открывающей '(' в заданной позиции.
  * Учитывает вложенные скобки: в "f(a(b))" для первой '(' вернёт позицию последней ')'.
  *
- * @param {string} s - строка, в которой ищем
- * @param {number} open - номер символа, где стоит открывающая скобка '('
- * @returns {number} номер символа закрывающей ')' или -1, если на этой строке она не закрыта
+ * Параметры:
+ *     s (string): строка, в которой ищем
+ *     open (number): номер символа, где стоит открывающая скобка '('
+ *
+ * Возвращаемое значение:
+ *     результат (number): номер символа закрывающей ')' или -1, если на этой строке она не закрыта
+ *
+ * Пример вызова:
+ *     findClose('if (a) b;', 3);   // → 5
+ *     findClose('if (a &&', 3);    // → -1  (скобка не закрыта)
  */
 function findClose(s: string, open: number): number {
   let depth = 0;   // сколько скобок сейчас открыто
@@ -182,9 +139,15 @@ function findClose(s: string, open: number): number {
  * Ищет ближайшую строку ниже заданной, в которой есть код
  * (пустые строки и строки, состоящие только из комментария, пропускаются).
  *
- * @param {string[]} masked - «закрашенные» строки файла (результат maskLines)
- * @param {number} n - номер строки, после которой начинаем поиск
- * @returns {number} номер найденной строки или -1, если кода дальше нет
+ * Параметры:
+ *     masked (string[]): «закрашенные» строки файла (результат maskLines)
+ *     n (number): номер строки, после которой начинаем поиск
+ *
+ * Возвращаемое значение:
+ *     результат (number): номер найденной строки или -1, если кода дальше нет
+ *
+ * Пример вызова:
+ *     nextCode(['if (x)', '', '  return;'], 0);   // → 2
  */
 function nextCode(masked: string[], n: number): number {
   for (let i = n + 1; i < masked.length; i++) {
@@ -203,8 +166,16 @@ function nextCode(masked: string[], n: number): number {
  * заново — либо табами, либо пробелами (смотря чем начинался старый отступ).
  * Повторный вызов на уже исправленном отступе ничего не меняет.
  *
- * @param {string} ws - отступ строки (пробелы и табуляции в её начале)
- * @returns {string} исправленный отступ: только табы или только пробелы (кратно 4)
+ * Параметры:
+ *     ws (string): отступ строки (пробелы и табуляции в её начале)
+ *
+ * Возвращаемое значение:
+ *     результат (string): исправленный отступ: только табы или только пробелы (кратно 4)
+ *
+ * Пример вызова:
+ *     fixIndent('      ');    // 6 пробелов → '        ' (8 пробелов)
+ *     fixIndent('\t ');       // таб и пробел → '\t'
+ *     fixIndent('    ');      // → '    ' (уже правильно, не меняется)
  */
 function fixIndent(ws: string): string {
   let width = 0;   // ширина отступа в колонках
@@ -223,9 +194,16 @@ function fixIndent(ws: string): string {
  * Строки-продолжения (предыдущая строка закончилась на запятую, скобку,
  * знак операции) на кратность 4 не проверяются — там допустимо выравнивание.
  *
- * @param {string[]} lines - настоящие строки файла
- * @param {string[]} masked - те же строки с «закрашенными» комментариями
- * @param {Issue[]} issues - общий список нарушений, куда добавляются найденные
+ * Параметры:
+ *     lines (string[]): настоящие строки файла
+ *     masked (string[]): те же строки с «закрашенными» комментариями
+ *     issues (Issue[]): общий список нарушений, куда добавляются найденные
+ *
+ * Возвращаемое значение:
+ *     нет (void): ничего не возвращает, а дописывает результат в issues
+ *
+ * Пример вызова:
+ *     // файл: ['int main() {', '   int a;', '}']  → нарушение в строке 1 (3 пробела)
  */
 function checkIndent(lines: string[], masked: string[], issues: Issue[]) {
   let prev = '';   // предыдущая строка с кодом (без пробелов по краям)
@@ -256,6 +234,7 @@ function checkIndent(lines: string[], masked: string[], issues: Issue[]) {
     prev = m.trim();
   });
 }
+
 // ===================================================================
 // 3. Проверка пробелов (правило spacing)
 // ===================================================================
@@ -278,13 +257,34 @@ const WORD_BEFORE_UNARY = new Set(['return', 'case', 'throw', 'else', 'operator'
  * Звёздочка *, амперсанд &, угловые скобки < > не проверяются
  * (они могут означать указатели, ссылки и шаблоны).
  *
- * @param {string[]} masked - «закрашенные» строки файла
- * @param {Issue[]} issues - общий список нарушений, куда добавляются найденные
+ * Параметры:
+ *     masked (string[]): «закрашенные» строки файла
+ *     issues (Issue[]): общий список нарушений, куда добавляются найденные
+ *
+ * Возвращаемое значение:
+ *     нет (void): ничего не возвращает, а дописывает результат в issues
+ *
+ * Пример вызова:
+ *     // 'int a=5;'          → нарушение: нужны пробелы вокруг «=»
+ *     // 'f(a,b);'           → нарушение: нужен пробел после запятой
+ *     // 'for (i=0;i<n;i++)' → нарушения: «=» и два «;»
  */
 function checkSpacing(masked: string[], issues: Issue[]) {
   masked.forEach((line, n) => {
     /**
      * Вспомогательная функция: добавляет нарушение «пробелов» в текущую строку.
+     *
+     * Параметры:
+     *     start (number): начало подчёркивания в строке
+     *     end (number): конец подчёркивания в строке
+     *     message (string): описание нарушения
+     *     text (string): на что заменить подчёркнутый кусок при исправлении
+     *
+     * Возвращаемое значение:
+     *     результат (number): новая длина списка issues (результат push, не используется)
+     *
+     * Пример вызова:
+     *     add(5, 6, 'Нужны пробелы вокруг «=»', ' = ');
      */
     const add = (start: number, end: number, message: string, text: string) =>
       issues.push({ line: n, start, end, rule: 'spacing', message, edits: [{ line: n, start, end, text }] });
@@ -341,6 +341,7 @@ function checkSpacing(masked: string[], issues: Issue[]) {
     }
   });
 }
+
 // ===================================================================
 // 4. Проверка фигурных скобок (правило braces)
 // ===================================================================
@@ -356,9 +357,19 @@ const BLOCK_RE = /\b(if|for|while|switch)\s*\(|\belse\b(?!\s+if\b)/g;
  * Нарушение: тело записано на следующей строке без скобок.
  * Автоисправление возможно, только если тело — ровно один простой оператор.
  *
- * @param {string[]} lines - настоящие строки файла (нужны, чтобы узнать отступ)
- * @param {string[]} masked - «закрашенные» строки файла
- * @param {Issue[]} issues - общий список нарушений, куда добавляются найденные
+ * Параметры:
+ *     lines (string[]): настоящие строки файла (нужны, чтобы узнать отступ)
+ *     masked (string[]): «закрашенные» строки файла
+ *     issues (Issue[]): общий список нарушений, куда добавляются найденные
+ *
+ * Возвращаемое значение:
+ *     нет (void): ничего не возвращает, а дописывает результат в issues
+ *
+ * Пример вызова:
+ *     // if (x)            ← нарушение (подчёркнуто слово if)
+ *     //     return 1;
+ *     //
+ *     // if (x) return 1;  ← нарушения нет (короткая запись в одну строку)
  */
 function checkBraces(lines: string[], masked: string[], issues: Issue[]) {
   masked.forEach((line, n) => {
@@ -405,6 +416,7 @@ function checkBraces(lines: string[], masked: string[], issues: Issue[]) {
     }
   });
 }
+
 // ===================================================================
 // 5. Проверка имён (правило naming)
 // ===================================================================
@@ -429,8 +441,16 @@ const KEYWORDS = new Set(['return', 'delete', 'new', 'throw', 'goto', 'case', 'e
 /**
  * Разбивает имя на отдельные слова (маленькими буквами).
  *
- * @param {string} name - исходное имя
- * @returns {string[]} список слов
+ * Параметры:
+ *     name (string): исходное имя
+ *
+ * Возвращаемое значение:
+ *     результат (string[]): список слов
+ *
+ * Пример вызова:
+ *     words('userName');    // → ['user', 'name']
+ *     words('MAX_COUNT');   // → ['max', 'count']
+ *     words('HTTPServer');  // → ['http', 'server']
  */
 function words(name: string): string[] {
   return name
@@ -444,8 +464,14 @@ function words(name: string): string[] {
 /**
  * Переводит имя в PascalCase (каждое слово с большой буквы, без подчёркиваний).
  *
- * @param {string} name - исходное имя
- * @returns {string} имя в PascalCase
+ * Параметры:
+ *     name (string): исходное имя
+ *
+ * Возвращаемое значение:
+ *     результат (string): имя в PascalCase
+ *
+ * Пример вызова:
+ *     pascal('find_element');   // → 'FindElement'
  */
 const pascal = (name: string): string => words(name).map(w => w[0].toUpperCase() + w.slice(1)).join('');
 
@@ -453,8 +479,16 @@ const pascal = (name: string): string => words(name).map(w => w[0].toUpperCase()
  * Переводит имя в snake_case (слова маленькими буквами через «_»).
  * Если имя заканчивалось на «_» (поле класса), подчёркивание сохраняется.
  *
- * @param {string} name - исходное имя
- * @returns {string} имя в snake_case
+ * Параметры:
+ *     name (string): исходное имя
+ *
+ * Возвращаемое значение:
+ *     результат (string): имя в snake_case
+ *
+ * Пример вызова:
+ *     toSnake('userName');    // → 'user_name'
+ *     toSnake('ItemCount');   // → 'item_count'
+ *     toSnake('Value_');      // → 'value_'
  */
 export const toSnake = (name: string): string => words(name).join('_') + (name.endsWith('_') ? '_' : '');
 
@@ -462,11 +496,18 @@ export const toSnake = (name: string): string => words(name).join('_') + (name.e
  * Проверяет одно имя; если оно написано не по правилам — добавляет нарушение.
  * Ключевые слова и имена, начинающиеся с «_», пропускаются.
  *
- * @param {Issue[]} issues - общий список нарушений
- * @param {number} line - номер строки, где стоит имя (с нуля)
- * @param {number} col - номер символа, с которого начинается имя
- * @param {string} name - само имя
- * @param {Kind} kind - что это за имя: 'variable' | 'function' | 'type' | 'constant'
+ * Параметры:
+ *     issues (Issue[]): общий список нарушений
+ *     line (number): номер строки, где стоит имя (с нуля)
+ *     col (number): номер символа, с которого начинается имя
+ *     name (string): само имя
+ *     kind (Kind): что это за имя: 'variable' | 'function' | 'type' | 'constant'
+ *
+ * Возвращаемое значение:
+ *     нет (void): ничего не возвращает, а дописывает результат в issues
+ *
+ * Пример вызова:
+ *     checkName(issues, 0, 4, 'userName', 'variable');   // добавит нарушение, предложит 'user_name'
  */
 function checkName(issues: Issue[], line: number, col: number, name: string, kind: Kind) {
   if (KEYWORDS.has(name) || name.startsWith('_') || STYLE[kind].re.test(name)) return;   // имя в порядке
@@ -500,8 +541,14 @@ const VAR_RE = /^\s*(?:for\s*\(\s*)?((?:(?:static|constexpr|const|inline|extern|
  * Делит текст параметров функции по запятым верхнего уровня.
  * Запятые внутри <...> и (...) не считаются разделителями.
  *
- * @param {string} s - текст между скобками функции, например "int a, std::map<int, int> m"
- * @returns {{text: string, offset: number}[]} список параметров
+ * Параметры:
+ *     s (string): текст между скобками функции, например "int a, std::map<int, int> m"
+ *
+ * Возвращаемое значение:
+ *     результат ({text: string, offset: number}[]): список параметров: text — текст параметра, offset — номер символа, с которого он начинается внутри s
+ *
+ * Пример вызова:
+ *     splitParams('int a, int b');   // → [{text:'int a', offset:0}, {text:' int b', offset:6}]
  */
 function splitParams(s: string): { text: string; offset: number }[] {
   const out: { text: string; offset: number }[] = [];
@@ -523,8 +570,17 @@ function splitParams(s: string): { text: string; offset: number }[] {
  * Проверяет имена в строках файла: типы, функции (и их параметры), переменные, константы.
  * Если случай нельзя определить надёжно — строка пропускается (ложные срабатывания недопустимы).
  *
- * @param {string[]} masked - «закрашенные» строки файла
- * @param {Issue[]} issues - общий список нарушений, куда добавляются найденные
+ * Параметры:
+ *     masked (string[]): «закрашенные» строки файла
+ *     issues (Issue[]): общий список нарушений, куда добавляются найденные
+ *
+ * Возвращаемое значение:
+ *     нет (void): ничего не возвращает, а дописывает результат в issues
+ *
+ * Пример вызова:
+ *     // 'int userName = 5;'      → нарушение: userName → user_name
+ *     // 'int calculateSum(int a)' → нарушение: calculateSum → CalculateSum
+ *     // 'class user_data {'       → нарушение: user_data → UserData
  */
 function checkNaming(masked: string[], issues: Issue[]) {
   masked.forEach((line, n) => {
@@ -548,6 +604,18 @@ function checkNaming(masked: string[], issues: Issue[]) {
 
       const params = line.slice(open + 1, close);                   // текст между скобками
       const pieces = params.trim() === '' ? [] : splitParams(params);   // список параметров
+      /**
+       * Отбрасывает значение параметра по умолчанию: всё, что после «=», и пробелы по краям.
+       *
+       * Параметры:
+       *     s (string): текст одного параметра, например «int a = 5»
+       *
+       * Возвращаемое значение:
+       *     результат (string): параметр без значения по умолчанию, например «int a»
+       *
+       * Пример вызова:
+       *     withoutDefault('int a = 5');   // → 'int a'
+       */
       const withoutDefault = (s: string) => s.split('=')[0].trim();     // отбрасываем значение по умолчанию (= 5)
 
       // Это функция, если все параметры имеют вид «тип имя» (иначе это, например, Foo bar(1, 2);)
@@ -582,4 +650,83 @@ function checkNaming(masked: string[], issues: Issue[]) {
     const col = line.lastIndexOf(name, v[0].length - term.length);   // где в строке начинается имя
     checkName(issues, n, col, name, isConstant ? 'constant' : 'variable');
   });
+}
+
+// ===================================================================
+// 6. Публичные функции (их использует extension.ts)
+// ===================================================================
+
+/**
+ * Главная функция проверки: находит все нарушения стиля в тексте программы.
+ *
+ * Параметры:
+ *     text (string): полный текст файла C/C++
+ *
+ * Возвращаемое значение:
+ *     результат (Issue[]): список нарушений, отсортированный по номеру строки
+ *
+ * Пример вызова:
+ *     const issues = check('int main() {\n   int a=1;\n}');
+ *     // issues[0].rule === 'indentation'  (3 пробела)
+ *     // issues[1].rule === 'spacing'      (нет пробелов вокруг «=»)
+ */
+export function check(text: string): Issue[] {
+  const lines = text.split(/\r?\n/);     // делим на строки (поддерживаем и \n, и \r\n)
+  const masked = maskLines(lines);       // «закрашиваем» комментарии и строки
+  const issues: Issue[] = [];
+  checkIndent(lines, masked, issues);
+  checkSpacing(masked, issues);
+  checkBraces(lines, masked, issues);
+  checkNaming(masked, issues);
+  return issues.sort((a, b) => a.line - b.line || a.start - b.start);   // сортируем по строке, затем по позиции
+}
+
+/**
+ * Применяет правки к тексту. Правки, которые пересекаются с уже применёнными, пропускаются
+ * (чтобы две правки не испортили друг друга).
+ *
+ * Параметры:
+ *     text (string): исходный текст файла
+ *     edits (Edit[]): список правок (обычно собранный из issue.edits)
+ *
+ * Возвращаемое значение:
+ *     результат (string): новый текст с применёнными правками (строки соединены через «\n»)
+ *
+ * Пример вызова:
+ *     applyEdits('a=1;', [{line: 0, start: 1, end: 2, text: ' = '}]);   // → 'a = 1;'
+ */
+export function applyEdits(text: string, edits: Edit[]): string {
+  const lines = text.split(/\r?\n/);
+  // Применяем с конца файла к началу, чтобы правки не сдвигали позиции друг друга
+  const sorted = [...edits].sort((a, b) => b.line - a.line || b.start - a.start);
+  let lastLine = -1;    // строка последней применённой правки
+  let lastStart = 0;    // где последняя применённая правка начиналась
+  for (const e of sorted) {
+    if (e.line === lastLine && e.end > lastStart) continue;   // правка пересекается с уже применённой — пропускаем
+    lines[e.line] = lines[e.line].slice(0, e.start) + e.text + lines[e.line].slice(e.end);
+    lastLine = e.line;
+    lastStart = e.start;
+  }
+  return lines.join('\n');
+}
+
+/**
+ * Считает оценку стиля в процентах по формуле
+ * score = max(0, round(100 − нарушения / строки × 100)).
+ *
+ * Параметры:
+ *     violations (number): количество нарушений
+ *     lineCount (number): количество строк в файле (0 для пустого файла)
+ *
+ * Возвращаемое значение:
+ *     результат (number): оценка от 0 до 100; для пустого файла и файла без нарушений — 100
+ *
+ * Пример вызова:
+ *     score(0, 50);    // → 100
+ *     score(5, 50);    // → 90
+ *     score(80, 50);   // → 0  (не может быть меньше нуля)
+ *     score(0, 0);     // → 100 (пустой файл)
+ */
+export function score(violations: number, lineCount: number): number {
+  return lineCount === 0 ? 100 : Math.max(0, Math.round(100 - violations / lineCount * 100));
 }
