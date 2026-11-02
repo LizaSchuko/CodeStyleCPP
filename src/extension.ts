@@ -174,3 +174,142 @@ class Fixer implements vscode.CodeActionProvider {
     return actions;
   }
 }
+// ===================================================================
+// Активация расширения
+// ===================================================================
+
+/**
+ * Точка входа: VS Code вызывает эту функцию один раз при первом открытии файла C/C++.
+ * Здесь регистрируются все команды и подписки на события редактора.
+ *
+ * @param {vscode.ExtensionContext} ctx - контекст расширения; всё, что мы в него добавляем
+ *        (ctx.subscriptions), VS Code автоматически «выключит» при отключении расширения
+ */
+export function activate(ctx: vscode.ExtensionContext) {
+  /**
+   * Короткая запись для регистрации команды.
+   * @param {string} id - идентификатор команды (как в package.json)
+   * @param {(...args: any[]) => any} fn - функция, которая выполняется при вызове команды
+   */
+  const reg = (id: string, fn: (...args: any[]) => any) =>
+    ctx.subscriptions.push(vscode.commands.registerCommand(id, fn));
+  const info = vscode.window.showInformationMessage;   // короткое имя для показа сообщений
+
+  // ---------- Ctrl+Alt+L: привести файл в порядок ----------
+  reg('codestyle.format', async () => {
+    const ed = activeCpp();
+    if (!ed) return;
+    const doc = ed.document;
+    const text = doc.getText();
+
+    // Шаг 1. Исправляем пробелы, фигурные скобки и отступы.
+    // Правки применяем к тексту в памяти, затем заменяем документ одним действием
+    // (так одна отмена Ctrl+Z возвращает всё назад).
+    const fixed = applyEdits(text, check(text).flatMap(i => i.edits ?? []));
+    if (fixed !== text) {
+      await ed.edit(b => b.replace(doc.validateRange(new vscode.Range(0, 0, doc.lineCount, 0)), fixed));
+    }
+
+    // Шаг 2. Переименовываем имена по одному, после каждого — повторная проверка.
+    await new Promise(r => setTimeout(r, 1000));   // небольшая пауза: даём языковому серверу перечитать файл
+    let renamed = 0;                               // сколько имён переименовали
+    const tried = new Set<string>();               // позиции, которые уже пытались переименовать (чтобы не зациклиться)
+    for (;;) {
+      const next: Issue | undefined = check(doc.getText())
+        .find(i => i.newName && !tried.has(`${i.line}:${i.start}`));
+      if (!next) break;                            // непроверенных имён не осталось
+      tried.add(`${next.line}:${next.start}`);
+      if (await rename(doc.uri, new vscode.Position(next.line, next.start), next.newName!)) renamed++;
+    }
+
+    // Итог
+    refresh(doc);
+    const left = analyze(doc).issues.length;       // сколько нарушений осталось
+    const note = renamed === 0 && tried.size > 0 ? ' Языковой сервер C/C++ недоступен — имена не переименованы.' : '';
+    info(`Готово. Переименовано имён: ${renamed}. Осталось нарушений: ${left}.${note}`);
+  });
+
+  // ---------- Ctrl+Alt+K: проверить без изменений ----------
+  reg('codestyle.check', async () => {
+    const ed = activeCpp();
+    if (!ed) return;
+    refresh(ed.document);
+    const n = analyze(ed.document).issues.length;
+    if (n === 0) { info('Нарушений не найдено'); return; }
+    vscode.window.showWarningMessage(`Найдено нарушений: ${n}`);
+    await vscode.commands.executeCommand('workbench.actions.view.problems');   // открываем панель Problems
+  });
+
+  // ---------- Ctrl+Alt+S: показать оценку ----------
+  reg('codestyle.score', () => {
+    const ed = activeCpp();
+    if (!ed) return;
+    const { issues, lines, percent } = analyze(ed.document);
+    info(`Оценка стиля: ${percent}% (нарушений: ${issues.length}, строк: ${lines}). ` +
+      'Оценка отражает только реализованные проверки стиля, а не качество и корректность программы.');
+  });
+
+  // ---------- Ctrl+Alt+R: отчёт в формате Markdown ----------
+  reg('codestyle.report', async () => {
+    const ed = activeCpp();
+    if (!ed) return;
+    const { issues, lines, percent } = analyze(ed.document);
+
+    // Таблица нарушений (или фраза «Проблем не обнаружено»)
+    const table = issues.length
+      ? ['| № | Строка | Категория | Описание |', '|---|---|---|---|',
+         ...issues.map((i, k) => `| ${k + 1} | ${i.line + 1} | ${i.rule} | ${i.message} |`)]
+      : ['Проблем не обнаружено'];
+
+    const md = ['# Отчёт CodeStyle', '',
+      `- Файл: ${ed.document.fileName}`, `- Строк: ${lines}`,
+      `- Нарушений: ${issues.length}`, `- Оценка: ${percent}%`, '', ...table].join('\n');
+
+    // Стандартный диалог «Сохранить как»
+    const uri = await vscode.window.showSaveDialog({
+      defaultUri: vscode.Uri.file(ed.document.fileName + '.report.md'), filters: { Markdown: ['md'] } });
+    if (!uri) return;   // пользователь нажал «Отмена» — ничего не сохраняем
+    await vscode.workspace.fs.writeFile(uri, Buffer.from(md, 'utf8'));
+    info('Отчёт сохранён');
+  });
+
+  // ---------- Переименовать переменную в snake_case (курсор на имени) ----------
+  reg('codestyle.rename', async () => {
+    const ed = activeCpp();
+    if (!ed) return;
+    const range = ed.document.getWordRangeAtPosition(ed.selection.active);   // слово под курсором
+    if (!range) { info('Поставьте курсор на имя переменной'); return; }
+    const old = ed.document.getText(range);
+    // Показываем окно ввода с предложенным именем в snake_case; пользователь может его изменить
+    const name = await vscode.window.showInputBox({ prompt: `Новое имя для «${old}»`, value: toSnake(old) });
+    if (name && name !== old && !(await rename(ed.document.uri, range.start, name))) {
+      vscode.window.showWarningMessage(NO_SERVER);
+    }
+  });
+
+  // ---------- Внутренняя команда: переименование из меню Quick Fix ----------
+  reg('codestyle.renameAt', async (uri: vscode.Uri, pos: vscode.Position, name: string) => {
+    if (!(await rename(uri, pos, name))) vscode.window.showWarningMessage(NO_SERVER);
+  });
+
+  // ---------- Подписки на события редактора ----------
+  ctx.subscriptions.push(
+    diagnostics, statusBar,
+    // Меню быстрых исправлений для C и C++
+    vscode.languages.registerCodeActionsProvider(['c', 'cpp'], new Fixer(),
+      { providedCodeActionKinds: [vscode.CodeActionKind.QuickFix] }),
+    // Файл открыт → проверяем
+    vscode.workspace.onDidOpenTextDocument(refresh),
+    // Текст изменился → проверяем заново
+    vscode.workspace.onDidChangeTextDocument(e => refresh(e.document)),
+    // Файл закрыт → убираем его предупреждения
+    vscode.workspace.onDidCloseTextDocument(d => diagnostics.delete(d.uri)),
+    // Переключились на другую вкладку → обновляем процент (или прячем, если это не C/C++)
+    vscode.window.onDidChangeActiveTextEditor(e => {
+      if (e && isCpp(e.document)) refresh(e.document); else statusBar.hide();
+    }),
+  );
+
+  // Проверяем файлы, которые уже были открыты до активации расширения
+  vscode.workspace.textDocuments.forEach(d => refresh(d));
+}
