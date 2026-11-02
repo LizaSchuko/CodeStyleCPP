@@ -73,8 +73,27 @@ export function check(text: string): Issue[] {
  * @param {Edit[]} edits - список правок (обычно собранный из issue.edits)
  * @returns {string} новый текст с применёнными правками (строки соединены через «\n»)
  */
+/**
+ * Применяет правки к тексту. Правки, которые пересекаются с уже применёнными, пропускаются
+ * (чтобы две правки не испортили друг друга).
+ *
+ * @param {string} text - исходный текст файла
+ * @param {Edit[]} edits - список правок (обычно собранный из issue.edits)
+ * @returns {string} новый текст с применёнными правками (строки соединены через «\n»)
+ */
 export function applyEdits(text: string, edits: Edit[]): string {
-  return text;
+  const lines = text.split(/\r?\n/);
+  // Применяем с конца файла к началу, чтобы правки не сдвигали позиции друг друга
+  const sorted = [...edits].sort((a, b) => b.line - a.line || b.start - a.start);
+  let lastLine = -1;    // строка последней применённой правки
+  let lastStart = 0;    // где последняя применённая правка начиналась
+  for (const e of sorted) {
+    if (e.line === lastLine && e.end > lastStart) continue;   // правка пересекается с уже применённой — пропускаем
+    lines[e.line] = lines[e.line].slice(0, e.start) + e.text + lines[e.line].slice(e.end);
+    lastLine = e.line;
+    lastStart = e.start;
+  }
+  return lines.join('\n');
 }
 
 /**
