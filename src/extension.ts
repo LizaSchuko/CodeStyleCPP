@@ -86,3 +86,31 @@ function refresh(doc: vscode.TextDocument) {
     statusBar.show();
   }
 }
+// ===================================================================
+// Переименование через языковой сервер C/C++
+// ===================================================================
+
+/**
+ * Переименовывает имя с помощью языкового сервера C/C++ (расширение Microsoft C/C++).
+ * Сервер знает области видимости, поэтому комментарии, строки и одноимённые
+ * переменные в других функциях не затрагиваются (простая замена текста запрещена).
+ *
+ * @param {vscode.Uri} uri - адрес (путь) файла
+ * @param {vscode.Position} pos - позиция на любом символе переименовываемого имени
+ * @param {string} newName - новое имя
+ * @returns {Promise<boolean>} true — переименование выполнено; false — сервера нет или он отказал
+ */
+async function rename(uri: vscode.Uri, pos: vscode.Position, newName: string): Promise<boolean> {
+  try {
+    // Просим языковой сервер подготовить набор правок для переименования
+    const edit = await vscode.commands.executeCommand<vscode.WorkspaceEdit>(
+      'vscode.executeDocumentRenameProvider', uri, pos, newName);
+    if (edit && edit.size > 0) return await vscode.workspace.applyEdit(edit);   // применяем правки
+  } catch {
+    // Сервера нет или он вернул ошибку — просто сообщим о неудаче через return false
+  }
+  return false;
+}
+
+/** Сообщение, которое показывается, если переименовать не удалось. */
+const NO_SERVER = 'Не удалось переименовать: нужен языковой сервер C/C++ (расширение «C/C++» от Microsoft).';
