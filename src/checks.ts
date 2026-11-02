@@ -59,6 +59,7 @@ export function check(text: string): Issue[] {
   const masked = maskLines(lines);       // «закрашиваем» комментарии и строки
   const issues: Issue[] = [];
   checkIndent(lines, masked, issues);
+  checkSpacing(masked, issues);
   return issues.sort((a, b) => a.line - b.line || a.start - b.start);
 }
 
@@ -239,5 +240,90 @@ function checkIndent(lines: string[], masked: string[], issues: Issue[]) {
       });
     }
     prev = m.trim();
+  });
+}
+// ===================================================================
+// 3. Проверка пробелов (правило spacing)
+// ===================================================================
+
+/**
+ * Регулярное выражение для поиска операторов в строке.
+ * Длинные операторы стоят раньше коротких (иначе «==» распознается как два «=»).
+ */
+const OPS = /<=>|<<=|>>=|->|\+\+|--|<<|>>|&&|\|\||==|!=|<=|>=|[-+*\/%&|^]=|=|[-+\/%]/g;
+
+/** Операторы, которые найдены регулярным выражением, но пробелов вокруг не требуют. */
+const SKIP_OPS = new Set(['->', '++', '--', '<<', '>>', '<=>', '<<=', '>>=']);
+
+/** Слова, после которых «+» и «-» — это знак числа (return -1), а не вычитание. */
+const WORD_BEFORE_UNARY = new Set(['return', 'case', 'throw', 'else', 'operator', 'co_return', 'co_yield', 'delete']);
+
+/**
+ * Проверяет пробелы: вокруг операторов (=, +=, ==, &&, ||, +, -, /, % и др.),
+ * после запятой и после «;» в заголовке цикла for.
+ * Звёздочка *, амперсанд &, угловые скобки < > не проверяются
+ * (они могут означать указатели, ссылки и шаблоны).
+ *
+ * @param {string[]} masked - «закрашенные» строки файла
+ * @param {Issue[]} issues - общий список нарушений, куда добавляются найденные
+ */
+function checkSpacing(masked: string[], issues: Issue[]) {
+  masked.forEach((line, n) => {
+    /**
+     * Вспомогательная функция: добавляет нарушение «пробелов» в текущую строку.
+     */
+    const add = (start: number, end: number, message: string, text: string) =>
+      issues.push({ line: n, start, end, rule: 'spacing', message, edits: [{ line: n, start, end, text }] });
+
+    // ---- а) пробелы вокруг операторов ----
+    for (const m of line.matchAll(OPS)) {
+      const op = m[0];                  // найденный оператор, например "+="
+      const i = m.index!;               // где он начинается
+      const e = i + op.length;          // где заканчивается
+      if (SKIP_OPS.has(op)) continue;   // -> ++ -- << >> пропускаем
+
+      const before = line.slice(0, i);  // текст строки слева от оператора
+
+      if (/\boperator\s*$/.test(before)) continue;   // operator== , operator+ — это имя функции, а не операция
+
+      // Лямбда-захват [=] или [=, x] — это не присваивание
+      if (op === '=' && /^\s*[\],]/.test(line.slice(e)) && /[\[,]\s*$/.test(before)) continue;
+
+      // Для одиночных + - / % надо отличить вычитание от знака числа
+      if (op.length === 1 && '+-/%'.includes(op)) {
+        const left = before.trimEnd();                                   // текст слева без хвостовых пробелов
+        if (!/[\w\]]$/.test(left)) continue;                              // слева не имя/число/] — это знак числа (x = -y) или скобка
+        if (WORD_BEFORE_UNARY.has(/\w+$/.exec(left)?.[0] ?? '')) continue;   // return -1
+        if ('+-'.includes(op) && /(^|[^\w.])\d[\w.]*[eE]$/.test(left)) continue;   // запись числа 1e-5
+      }
+
+      const leftOk = i === 0 || /\s/.test(line[i - 1]);              // слева есть пробел (или начало строки)
+      const rightOk = e >= line.length || /\s/.test(line[e]);        // справа есть пробел (или конец строки)
+
+      // «a&&b» — нарушение, а «T&& x» (ссылка) — нет, поэтому для && требуем отсутствие пробелов с обеих сторон
+      const bad = op === '&&' ? !leftOk && !rightOk : !leftOk || !rightOk;
+
+      if (bad) {
+        // Исправление: добавляем только недостающие пробелы
+        add(i, e, `Нужны пробелы вокруг «${op}»`, (leftOk ? '' : ' ') + op + (rightOk ? '' : ' '));
+      }
+    }
+
+    // ---- б) пробел после запятой ----
+    for (const m of line.matchAll(/,(?=\S)/g)) {   // запятая, за которой сразу идёт НЕ пробел
+      if (/\boperator\s*$/.test(line.slice(0, m.index))) continue;   // operator, — имя функции
+      add(m.index!, m.index! + 1, 'Нужен пробел после запятой', ', ');
+    }
+
+    // ---- в) пробел после «;» в заголовке for ----
+    for (const m of line.matchAll(/\bfor\s*\(/g)) {
+      const open = m.index! + m[0].length - 1;     // позиция открывающей скобки '('
+      const close = findClose(line, open);         // позиция закрывающей ')'
+      if (close < 0) continue;                     // заголовок на несколько строк — пропускаем
+      for (let i = open + 1; i < close; i++) {
+        // «;» без пробела после него (но «;;» и «;)» — это нормально)
+        if (line[i] === ';' && !/[\s;)]/.test(line[i + 1])) add(i, i + 1, 'Нужен пробел после «;»', '; ');
+      }
+    }
   });
 }
