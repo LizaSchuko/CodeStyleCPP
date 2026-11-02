@@ -313,3 +313,10 @@ export function activate(ctx: vscode.ExtensionContext) {
   // Проверяем файлы, которые уже были открыты до активации расширения
   vscode.workspace.textDocuments.forEach(d => refresh(d));
 }
+/**
+ * Вызывается VS Code при выключении расширения. Освобождать вручную нечего:
+ * всё, что мы зарегистрировали, лежит в ctx.subscriptions и очищается автоматически.
+ *
+ * @returns {void} ничего не возвращает
+ */
+export function deactivate() {}
