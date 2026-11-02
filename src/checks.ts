@@ -60,6 +60,7 @@ export function check(text: string): Issue[] {
   const issues: Issue[] = [];
   checkIndent(lines, masked, issues);
   checkSpacing(masked, issues);
+  checkBraces(lines, masked, issues);
   return issues.sort((a, b) => a.line - b.line || a.start - b.start);
 }
 
@@ -324,6 +325,70 @@ function checkSpacing(masked: string[], issues: Issue[]) {
         // «;» без пробела после него (но «;;» и «;)» — это нормально)
         if (line[i] === ';' && !/[\s;)]/.test(line[i + 1])) add(i, i + 1, 'Нужен пробел после «;»', '; ');
       }
+    }
+  });
+}
+// ===================================================================
+// 4. Проверка фигурных скобок (правило braces)
+// ===================================================================
+
+/** Ищет в строке слова if/for/while/switch со скобкой «(», а также слово else (но не «else if»). */
+const BLOCK_RE = /\b(if|for|while|switch)\s*\(|\belse\b(?!\s+if\b)/g;
+
+/**
+ * Проверяет, что у if, else, for, while тело заключено в { }, а у switch есть блок { }.
+ * Допустимо:
+ *   - короткая запись в одну строку:  if (x) return;
+ *   - открывающая скобка на следующей строке.
+ * Нарушение: тело записано на следующей строке без скобок.
+ * Автоисправление возможно, только если тело — ровно один простой оператор.
+ *
+ * @param {string[]} lines - настоящие строки файла (нужны, чтобы узнать отступ)
+ * @param {string[]} masked - «закрашенные» строки файла
+ * @param {Issue[]} issues - общий список нарушений, куда добавляются найденные
+ */
+function checkBraces(lines: string[], masked: string[], issues: Issue[]) {
+  masked.forEach((line, n) => {
+    for (const m of line.matchAll(BLOCK_RE)) {
+      const word = m[1] ?? 'else';              // найденное слово: if / for / while / switch / else
+      let after = m.index! + m[0].length;       // позиция сразу после слова
+
+      if (word !== 'else') {
+        // У if/for/while/switch после слова идёт условие в скобках — пропускаем его целиком
+        const close = findClose(line, after - 1);
+        if (close < 0) continue;                // условие занимает несколько строк — не трогаем
+        after = close + 1;
+      }
+
+      const rest = line.slice(after).trim();    // что написано после заголовка на той же строке
+      if (rest.startsWith('{')) continue;       // скобка на месте — всё хорошо
+
+      const next = nextCode(masked, n);         // ближайшая строка с кодом ниже
+      const bad = rest !== ''
+        ? word === 'switch'                                            // «if (x) return;» допустимо, но у switch скобки обязательны
+        : next >= 0 && !masked[next].trim().startsWith('{');           // тело на следующей строке и без «{»
+      if (!bad) continue;
+
+      const issue: Issue = {
+        line: n, start: m.index!, end: m.index! + word.length, rule: 'braces',
+        message: word === 'switch' ? 'У switch должен быть блок { }' : `Тело «${word}» должно быть заключено в { }`,
+      };
+
+      // Автоисправление — только если тело это один простой оператор на следующей строке
+      if (word !== 'switch' && rest === '') {
+        const body = masked[next].trim();   // строка с телом
+        const isOneStatement = body.endsWith(';') && body.split(';').length === 2;   // ровно одна «;» в конце
+        const isNested = /^(if|for|while|do|switch|try|else)\b/.test(body);         // тело начинается с вложенной конструкции
+        if (isOneStatement && !isNested) {
+          const indent = /^[ \t]*/.exec(lines[n])![0];       // отступ строки-заголовка
+          const semi = masked[next].lastIndexOf(';');         // где стоит «;» в строке с телом
+          issue.edits = [
+            { line: n, start: after, end: after, text: ' {' },                           // дописать « {» после заголовка
+            { line: next, start: semi + 1, end: semi + 1, text: '\n' + indent + '}' },   // дописать «}» после тела
+          ];
+        }
+      }
+      issues.push(issue);
     }
   });
 }
