@@ -42,3 +42,47 @@ const activeCpp = (): vscode.TextEditor | undefined => {
   const ed = vscode.window.activeTextEditor;
   return ed && isCpp(ed.document) ? ed : undefined;
 };
+// ===================================================================
+// Проверка документа
+// ===================================================================
+
+/**
+ * Проверяет документ и считает оценку стиля.
+ *
+ * @param {vscode.TextDocument} doc - проверяемый документ
+ * @returns {{issues: Issue[], lines: number, percent: number}} нарушения, количество строк
+ *          (0 для пустого файла) и оценка в процентах (0–100)
+ */
+function analyze(doc: vscode.TextDocument) {
+  const text = doc.getText();
+  const lines = text === '' ? 0 : doc.lineCount;   // пустой файл считаем за 0 строк
+  const issues = check(text);
+  return { issues, lines, percent: score(issues.length, lines) };
+}
+
+/**
+ * Обновляет подчёркивания, панель Problems и оценку в строке состояния.
+ * Вызывается при открытии файла и после каждого изменения текста;
+ * старые предупреждения при этом заменяются новыми (дубликатов не бывает).
+ *
+ * @param {vscode.TextDocument} doc - документ, который нужно перепроверить
+ */
+function refresh(doc: vscode.TextDocument) {
+  if (!isCpp(doc)) return;   // файлы других языков не трогаем
+  const { issues, percent } = analyze(doc);
+
+  // Превращаем наши нарушения (Issue) в «предупреждения» VS Code (Diagnostic)
+  diagnostics.set(doc.uri, issues.map(i => {
+    const range = new vscode.Range(i.line, i.start, i.line, i.end);   // что подчеркнуть
+    const d = new vscode.Diagnostic(range, i.message, vscode.DiagnosticSeverity.Warning);
+    d.source = SOURCE;   // «Code Style Linter»
+    d.code = i.rule;     // naming / indentation / spacing / braces
+    return d;
+  }));
+
+  // Процент показываем, только если это файл, который сейчас открыт на экране
+  if (vscode.window.activeTextEditor?.document.uri.toString() === doc.uri.toString()) {
+    statusBar.text = `$(checklist) Стиль: ${percent}%`;
+    statusBar.show();
+  }
+}
